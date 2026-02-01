@@ -1,0 +1,714 @@
+﻿Molt.Trade - Enhanced Crypto Trading Automation Bot
+Primary chains: Solana & Base
+Launchpads: pump.fun, bags
+DEX: SiloPerps for perpetual futures
+"""
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+import json
+import os
+from pathlib import Path
+import asyncio
+from typing import Dict, List, Tuple, Optional
+
+# Import custom modules
+from wallet_manager import WalletManager
+from chain_analyzer import ChainAnalyzer
+from x_monitor import XMonitor
+from trade_executor import TradeExecutor
+from confidence_scorer import ConfidenceScorer
+from database_manager import DatabaseManager
+
+# Page config
+st.set_page_config(
+    page_title="Molt.Trade",
+    page_icon="🤖",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom styling
+st.markdown("""
+    <style>
+    .main-header {
+        font-size: 2.5rem;
+        font-weight: bold;
+        color: #00D9FF;
+        text-align: center;
+        margin-bottom: 2rem;
+    }
+    .metric-card {
+        background-color: #1e1e2e;
+        border-left: 4px solid #00D9FF;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin: 0.5rem 0;
+    }
+    .success { color: #00FF41; }
+    .danger { color: #FF006E; }
+    .warning { color: #FFB703; }
+    </style>
+""", unsafe_allow_html=True)
+
+# Initialize session state
+def init_session_state():
+    if "wallet_connected" not in st.session_state:
+        st.session_state.wallet_connected = False
+    if "current_chain" not in st.session_state:
+        st.session_state.current_chain = "Solana"
+    if "simulation_mode" not in st.session_state:
+        st.session_state.simulation_mode = True
+    if "trade_history" not in st.session_state:
+        st.session_state.trade_history = []
+    if "x_handles" not in st.session_state:
+        st.session_state.x_handles = []
+    if "wallet_manager" not in st.session_state:
+        st.session_state.wallet_manager = WalletManager()
+    if "analyzer" not in st.session_state:
+        st.session_state.analyzer = ChainAnalyzer()
+    if "x_monitor" not in st.session_state:
+        st.session_state.x_monitor = XMonitor()
+    if "trade_executor" not in st.session_state:
+        st.session_state.trade_executor = TradeExecutor()
+    if "confidence_scorer" not in st.session_state:
+        st.session_state.confidence_scorer = ConfidenceScorer()
+    if "db_manager" not in st.session_state:
+        st.session_state.db_manager = DatabaseManager()
+
+init_session_state()
+
+# ====================
+# SIDEBAR - CONFIGURATION
+# ====================
+
+with st.sidebar:
+    st.markdown("### ⚙️ MOLT.TRADE CONFIG")
+    
+    # Chain Selection
+    chain = st.selectbox(
+        "Select Chain",
+        ["Solana", "Base"],
+        key="chain_select"
+    )
+    if chain != st.session_state.current_chain:
+        st.session_state.current_chain = chain
+        st.rerun()
+    
+    # Mode Toggle
+    col1, col2 = st.columns(2)
+    with col1:
+        simulation_mode = st.checkbox(
+            "🧪 Simulation Mode",
+            value=st.session_state.simulation_mode,
+            help="Test trades without real execution"
+        )
+        st.session_state.simulation_mode = simulation_mode
+    
+    with col2:
+        if st.session_state.wallet_connected:
+            st.markdown("<span class='success'>✓ Wallet Connected</span>", unsafe_allow_html=True)
+        else:
+            st.markdown("<span class='danger'>✗ No Wallet</span>", unsafe_allow_html=True)
+    
+    st.divider()
+    
+    # Confidence Settings
+    st.markdown("#### 📊 Confidence Scoring")
+    min_confidence = st.slider(
+        "Min Confidence % to Trade",
+        0, 100, 65, 5,
+        help="Minimum confidence score to trigger automated trades"
+    )
+    
+    max_balance_per_trade = st.slider(
+        "Max % Balance per Trade",
+        1, 100, 10, 1,
+        help="Maximum % of wallet balance to risk per trade"
+    )
+    
+    st.divider()
+    
+    # Trade Parameters
+    st.markdown("#### 🔧 Trade Parameters")
+    max_leverage = st.slider(
+        "Max Leverage (Perps)",
+        1, 20, 5, 1
+    )
+    
+    max_slippage = st.slider(
+        "Max Slippage %",
+        0.1, 5.0, 1.0, 0.1
+    )
+    
+    st.divider()
+    
+    # API Keys
+    st.markdown("#### 🔑 API Keys")
+    if st.checkbox("Enter API Keys"):
+        twitter_api_key = st.text_input("Twitter API Key", type="password")
+        dexscreener_key = st.text_input("DexScreener API Key (opt)", type="password")
+        helius_key = st.text_input("Helius API Key (Solana)", type="password")
+        
+        if st.button("💾 Save Keys"):
+            st.session_state.api_keys = {
+                "twitter": twitter_api_key,
+                "dexscreener": dexscreener_key,
+                "helius": helius_key
+            }
+            st.success("API keys saved to session (not stored)")
+
+# ====================
+# MAIN CONTENT
+# ====================
+
+st.markdown("<div class='main-header'>🤖 MOLT.TRADE</div>", unsafe_allow_html=True)
+st.markdown(f"<p style='text-align: center; color: #888;'>Enhanced Crypto Trading Bot | Chain: <b>{st.session_state.current_chain}</b> | Mode: <b>{'SIMULATION' if st.session_state.simulation_mode else 'LIVE'}</b></p>", unsafe_allow_html=True)
+
+# ====================
+# TAB NAVIGATION
+# ====================
+
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "💼 Wallet",
+    "🐦 X Monitor",
+    "📈 Analyzer",
+    "🚀 Trade",
+    "📊 Dashboard"
+])
+
+# ====================
+# TAB 1: WALLET MANAGEMENT
+# ====================
+
+with tab1:
+    st.markdown("## Wallet Management")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("### Create New Wallet")
+        if st.button("🆕 Generate New Wallet", key="gen_wallet"):
+            with st.spinner("Generating wallet..."):
+                try:
+                    wallet_data = st.session_state.wallet_manager.create_wallet(
+                        st.session_state.current_chain
+                    )
+                    st.session_state.created_wallet = wallet_data
+                    st.success("✓ Wallet created!")
+                    
+                    # Display wallet info
+                    st.json({
+                        "Chain": st.session_state.current_chain,
+                        "Public Address": wallet_data["public_key"],
+                        "⚠️ SAVE YOUR PRIVATE KEY": "Export and store securely (NEVER share!)"
+                    })
+                    
+                    # Provide download
+                    st.download_button(
+                        label="📥 Download Keypair JSON",
+                        data=json.dumps(wallet_data, indent=2),
+                        file_name=f"molt_wallet_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                        mime="application/json"
+                    )
+                except Exception as e:
+                    st.error(f"Error creating wallet: {str(e)}")
+    
+    with col2:
+        st.markdown("### Connect Existing Wallet")
+        
+        connection_method = st.radio(
+            "Connection Method",
+            ["Private Key", "Keypair JSON", "WalletConnect (Coming Soon)"]
+        )
+        
+        if connection_method == "Private Key":
+            private_key = st.text_area(
+                "Enter Private Key",
+                help="⚠️ Never paste real keys in production. This is session-only.",
+                type="password"
+            )
+            
+            if st.button("🔗 Connect with Private Key", key="connect_pk"):
+                try:
+                    result = st.session_state.wallet_manager.connect_wallet(
+                        st.session_state.current_chain,
+                        private_key=private_key
+                    )
+                    st.session_state.wallet_connected = True
+                    st.session_state.current_wallet = result
+                    st.success(f"✓ Connected: {result['public_key'][:10]}...")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Connection failed: {str(e)}")
+        
+        elif connection_method == "Keypair JSON":
+            uploaded_file = st.file_uploader(
+                "Upload Keypair JSON",
+                type="json"
+            )
+            
+            if uploaded_file and st.button("🔗 Connect with JSON", key="connect_json"):
+                try:
+                    keypair_data = json.load(uploaded_file)
+                    result = st.session_state.wallet_manager.connect_wallet(
+                        st.session_state.current_chain,
+                        keypair_data=keypair_data
+                    )
+                    st.session_state.wallet_connected = True
+                    st.session_state.current_wallet = result
+                    st.success(f"✓ Connected: {result['public_key'][:10]}...")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Connection failed: {str(e)}")
+    
+    if st.session_state.wallet_connected:
+        st.divider()
+        st.markdown("### 💰 Wallet Balance")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            try:
+                balance = st.session_state.wallet_manager.get_balance(
+                    st.session_state.current_chain,
+                    st.session_state.current_wallet["public_key"]
+                )
+                st.metric(
+                    label="Native Balance",
+                    value=f"{balance:.4f}",
+                    delta="SOL" if st.session_state.current_chain == "Solana" else "ETH"
+                )
+            except Exception as e:
+                st.warning(f"Could not fetch balance: {str(e)}")
+        
+        with col2:
+            st.metric(
+                "Max Trade Size",
+                f"${(float(getattr(balance, '__float__', lambda: 0)()) * max_balance_per_trade / 100):.2f}"
+            )
+        
+        with col3:
+            if st.button("🔓 Disconnect Wallet"):
+                st.session_state.wallet_connected = False
+                st.session_state.current_wallet = None
+                st.rerun()
+
+# ====================
+# TAB 2: X MONITOR
+# ====================
+
+with tab2:
+    st.markdown("## 🐦 X (Twitter) Monitoring")
+    
+    col1, col2 = st.columns([3, 1])
+    
+    with col1:
+        st.markdown("### Manage X Handles")
+        
+        new_handle = st.text_input(
+            "Add X Handle",
+            placeholder="@elonmusk or username"
+        )
+        
+        col_add, col_clear = st.columns(2)
+        with col_add:
+            if st.button("➕ Add Handle"):
+                if new_handle:
+                    if new_handle not in st.session_state.x_handles:
+                        st.session_state.x_handles.append(new_handle)
+                        st.success(f"Added {new_handle}")
+                        st.rerun()
+                    else:
+                        st.warning("Handle already in list")
+        
+        with col_clear:
+            if st.button("🗑️ Clear All"):
+                st.session_state.x_handles = []
+                st.rerun()
+        
+        if st.session_state.x_handles:
+            st.markdown("### Current Handles")
+            for handle in st.session_state.x_handles:
+                col_h, col_del = st.columns([4, 1])
+                with col_h:
+                    st.write(f"• {handle}")
+                with col_del:
+                    if st.button("❌", key=f"del_{handle}"):
+                        st.session_state.x_handles.remove(handle)
+                        st.rerun()
+    
+    with col2:
+        st.markdown("### ⚙️ Scan Settings")
+        scan_interval = st.number_input(
+            "Scan Interval (min)",
+            min_value=1,
+            max_value=60,
+            value=5
+        )
+        
+        lookback_hours = st.number_input(
+            "Lookback (hours)",
+            min_value=1,
+            max_value=72,
+            value=24
+        )
+    
+    if st.session_state.x_handles:
+        st.divider()
+        st.markdown("### 📊 Recent Mentions")
+        
+        if st.button("🔍 Scan Now", key="scan_x"):
+            with st.spinner("Scanning X for mentions..."):
+                try:
+                    mentions = st.session_state.x_monitor.scan_handles(
+                        st.session_state.x_handles,
+                        lookback_hours=lookback_hours
+                    )
+                    
+                    if mentions:
+                        df_mentions = pd.DataFrame(mentions)
+                        st.dataframe(
+                            df_mentions[["handle", "ticker", "timestamp", "engagement"]],
+                            use_container_width=True
+                        )
+                    else:
+                        st.info("No mentions found in lookback period")
+                except Exception as e:
+                    st.error(f"Scan error: {str(e)}")
+
+# ====================
+# TAB 3: ANALYZER
+# ====================
+
+with tab3:
+    st.markdown("## 📈 Ticker Analysis")
+    
+    col1, col2 = st.columns([3, 1])
+    
+    with col1:
+        ticker_input = st.text_input(
+            "Enter Ticker/Contract Address",
+            placeholder="SOL, $PUMP, 0x..."
+        )
+    
+    with col2:
+        st.markdown("### ")
+        if st.button("🔎 Analyze", key="analyze_btn"):
+            analyze_ticker = True
+        else:
+            analyze_ticker = False
+    
+    if ticker_input and analyze_ticker:
+        with st.spinner(f"Analyzing {ticker_input}..."):
+            try:
+                analysis = st.session_state.analyzer.analyze_ticker(
+                    ticker_input,
+                    st.session_state.current_chain
+                )
+                
+                if analysis:
+                    col1, col2, col3, col4 = st.columns(4)
+                    
+                    with col1:
+                        st.metric(
+                            "24h Volume",
+                            f"${analysis.get('volume_24h', 0):,.0f}"
+                        )
+                    
+                    with col2:
+                        vol_change = analysis.get('volume_change_pct', 0)
+                        col_style = "success" if vol_change > 0 else "danger"
+                        st.metric(
+                            "Volume Change",
+                            f"{vol_change:+.1f}%"
+                        )
+                    
+                    with col3:
+                        holders = analysis.get('holder_count', 0)
+                        concentration = analysis.get('holder_concentration', 0)
+                        st.metric(
+                            "Holders",
+                            f"{holders:,}"
+                        )
+                    
+                    with col4:
+                        concentration_pct = analysis.get('concentration_pct', 0)
+                        st.metric(
+                            "Top 10 %",
+                            f"{concentration_pct:.1f}%"
+                        )
+                    
+                    st.divider()
+                    
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.markdown("### 📊 Metrics")
+                        metrics_display = {
+                            "Price": f"${analysis.get('price', 0):.6f}",
+                            "Market Cap": f"${analysis.get('market_cap', 0):,.0f}",
+                            "Liquidity": f"${analysis.get('liquidity', 0):,.0f}",
+                            "Rugpull Risk": analysis.get('rugpull_risk_score', 'N/A'),
+                            "Bundle Activity": analysis.get('bundle_count', 0),
+                        }
+                        for key, val in metrics_display.items():
+                            st.write(f"**{key}**: {val}")
+                    
+                    with col2:
+                        st.markdown("### 🚨 Risk Factors")
+                        risks = analysis.get('risk_factors', [])
+                        if risks:
+                            for risk in risks:
+                                st.warning(f"⚠️ {risk}")
+                        else:
+                            st.success("✓ No major risk factors detected")
+                    
+                    st.divider()
+                    
+                    # Confidence Score
+                    confidence = st.session_state.confidence_scorer.calculate_score(analysis)
+                    
+                    col1, col2 = st.columns([2, 1])
+                    with col1:
+                        st.markdown("### 🎯 Confidence Score")
+                        
+                        # Visual progress bar
+                        confidence_normalized = confidence / 100
+                        st.progress(confidence_normalized)
+                        st.markdown(f"<h2 style='text-align: center; color: #00D9FF;'>{confidence:.1f}%</h2>", unsafe_allow_html=True)
+                    
+                    with col2:
+                        st.markdown("### Decision")
+                        if confidence >= min_confidence:
+                            st.success(f"✓ PASS (>{min_confidence}%)\nRecommended: BUY")
+                        else:
+                            st.warning(f"✗ FAIL (<{min_confidence}%)\nNot recommended")
+                
+                else:
+                    st.error("Could not analyze ticker")
+            
+            except Exception as e:
+                st.error(f"Analysis error: {str(e)}")
+
+# ====================
+# TAB 4: TRADE EXECUTION
+# ====================
+
+with tab4:
+    st.markdown("## 🚀 Trade Execution")
+    
+    if not st.session_state.wallet_connected:
+        st.warning("⚠️ Connect wallet first in the Wallet tab")
+    else:
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("### Trade Parameters")
+            
+            trade_ticker = st.text_input("Ticker", placeholder="SOL, $PUMP")
+            
+            trade_type = st.radio(
+                "Trade Type",
+                ["Spot Buy", "Spot Sell", "Perps Long", "Perps Short"]
+            )
+            
+            amount_sol = st.number_input(
+                f"Amount ({st.session_state.current_chain[:3]})",
+                min_value=0.01,
+                max_value=1000.0,
+                value=0.1,
+                step=0.01
+            )
+            
+            if "Perps" in trade_type:
+                leverage = st.slider(
+                    "Leverage",
+                    1, max_leverage, 5
+                )
+            
+            slippage = st.slider(
+                "Slippage %",
+                0.1, 5.0, 1.0, 0.1
+            )
+        
+        with col2:
+            st.markdown("### Preview")
+            
+            st.info(f"""
+            **Trade Summary:**
+            - Type: {trade_type}
+            - Ticker: {trade_ticker}
+            - Amount: {amount_sol} {st.session_state.current_chain[:3]}
+            - Slippage: {slippage}%
+            - Mode: {"SIMULATION" if st.session_state.simulation_mode else "⚠️ LIVE"}
+            """)
+            
+            col_sim, col_live = st.columns(2)
+            
+            with col_sim:
+                if st.button("🧪 Simulate Trade", key="sim_trade"):
+                    with st.spinner("Simulating..."):
+                        try:
+                            result = st.session_state.trade_executor.execute_trade(
+                                trade_ticker,
+                                trade_type,
+                                amount_sol,
+                                st.session_state.current_chain,
+                                slippage=slippage,
+                                simulate=True,
+                                leverage=leverage if "Perps" in trade_type else 1
+                            )
+                            
+                            st.session_state.trade_history.append({
+                                "timestamp": datetime.now(),
+                                "ticker": trade_ticker,
+                                "type": trade_type,
+                                "amount": amount_sol,
+                                "result": result,
+                                "simulated": True
+                            })
+                            
+                            st.success("✓ Simulation complete!")
+                            st.json(result)
+                        
+                        except Exception as e:
+                            st.error(f"Simulation error: {str(e)}")
+            
+            with col_live:
+                if not st.session_state.simulation_mode:
+                    if st.button("⚡ EXECUTE LIVE", key="live_trade"):
+                        confirm = st.checkbox("I confirm this LIVE trade")
+                        
+                        if confirm:
+                            password = st.text_input(
+                                "Confirm with password",
+                                type="password"
+                            )
+                            
+                            if st.button("✓ Execute"):
+                                with st.spinner("Executing trade..."):
+                                    try:
+                                        result = st.session_state.trade_executor.execute_trade(
+                                            trade_ticker,
+                                            trade_type,
+                                            amount_sol,
+                                            st.session_state.current_chain,
+                                            slippage=slippage,
+                                            simulate=False,
+                                            leverage=leverage if "Perps" in trade_type else 1,
+                                            wallet=st.session_state.current_wallet
+                                        )
+                                        
+                                        st.session_state.trade_history.append({
+                                            "timestamp": datetime.now(),
+                                            "ticker": trade_ticker,
+                                            "type": trade_type,
+                                            "amount": amount_sol,
+                                            "result": result,
+                                            "simulated": False
+                                        })
+                                        
+                                        st.success("✓ Trade executed!")
+                                        st.json(result)
+                                    
+                                    except Exception as e:
+                                        st.error(f"Trade error: {str(e)}")
+                else:
+                    st.info("Enable Live Mode in sidebar to execute trades")
+
+# ====================
+# TAB 5: DASHBOARD
+# ====================
+
+with tab5:
+    st.markdown("## 📊 Trading Dashboard")
+    
+    if st.session_state.trade_history:
+        df_trades = pd.DataFrame(st.session_state.trade_history)
+        
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            total_trades = len(df_trades)
+            st.metric("Total Trades", total_trades)
+        
+        with col2:
+            sim_trades = len(df_trades[df_trades['simulated'] == True])
+            st.metric("Simulated", sim_trades)
+        
+        with col3:
+            live_trades = len(df_trades[df_trades['simulated'] == False])
+            st.metric("Live Trades", live_trades)
+        
+        with col4:
+            total_volume = df_trades['amount'].sum()
+            st.metric("Total Volume", f"{total_volume:.2f}")
+        
+        st.divider()
+        
+        st.markdown("### Trade History")
+        
+        display_df = df_trades[['timestamp', 'ticker', 'type', 'amount', 'simulated']].copy()
+        display_df['timestamp'] = display_df['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
+        display_df['Status'] = display_df['simulated'].apply(lambda x: '🧪 SIM' if x else '⚡ LIVE')
+        
+        st.dataframe(
+            display_df[['timestamp', 'ticker', 'type', 'amount', 'Status']],
+            use_container_width=True
+        )
+        
+        st.divider()
+        
+        st.markdown("### Analytics")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("#### Trades by Type")
+            type_counts = df_trades['type'].value_counts()
+            st.bar_chart(type_counts)
+        
+        with col2:
+            st.markdown("#### Volume Timeline")
+            volume_by_date = df_trades.groupby(df_trades['timestamp'].dt.date)['amount'].sum()
+            st.line_chart(volume_by_date)
+    
+    else:
+        st.info("No trades yet. Execute trades from the Trade tab to see analytics.")
+    
+    st.divider()
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if st.button("📥 Export Trade History"):
+            if st.session_state.trade_history:
+                df_export = pd.DataFrame(st.session_state.trade_history)
+                csv = df_export.to_csv(index=False)
+                st.download_button(
+                    label="Download CSV",
+                    data=csv,
+                    file_name=f"molt_trades_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    mime="text/csv"
+                )
+    
+    with col2:
+        if st.button("🔄 Clear History"):
+            st.session_state.trade_history = []
+            st.rerun()
+
+# ====================
+# FOOTER
+# ====================
+
+st.divider()
+st.markdown("""
+<div style='text-align: center; color: #666; font-size: 0.8rem; padding: 2rem;'>
+    <p>🤖 Molt.Trade v1.0 | Crypto Trading Bot | Solana & Base</p>
+    <p>⚠️ Disclaimer: Trading crypto is risky. Use simulation mode to test. Not financial advice.</p>
+    <p>🔒 Security: Private keys never stored. All transactions signed locally.</p>
+</div>
+""", unsafe_allow_html=True)
